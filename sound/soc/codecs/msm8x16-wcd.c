@@ -34,6 +34,7 @@
 #include <linux/workqueue.h>
 #include <linux/sched.h>
 #include <sound/q6afe-v2.h>
+#include <linux/switch.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
@@ -127,6 +128,10 @@ static const DECLARE_TLV_DB_SCALE(digital_gain, 0, 1, 0);
 static const DECLARE_TLV_DB_SCALE(analog_gain, 0, 25, 1);
 static struct snd_soc_dai_driver msm8x16_wcd_i2s_dai[];
 
+static struct switch_dev accdet_data;
+static int accdet_state = 0;
+static struct delayed_work analog_switch_enable;
+
 #define MSM8X16_WCD_ACQUIRE_LOCK(x) \
 	mutex_lock_nested(&x, SINGLE_DEPTH_NESTING);
 
@@ -209,7 +214,6 @@ static void msm8x16_wcd_set_auto_zeroing(struct snd_soc_codec *codec,
 		bool enable);
 static void msm8x16_wcd_configure_cap(struct snd_soc_codec *codec,
 		bool micbias1, bool micbias2);
-static void msm8x16_skip_imped_detect(struct snd_soc_codec *codec);
 
 struct msm8x16_wcd_spmi msm8x16_wcd_modules[MAX_MSM8X16_WCD_DEVICE];
 
@@ -277,7 +281,6 @@ static const struct wcd_mbhc_cb mbhc_cb = {
 	.set_auto_zeroing = msm8x16_wcd_set_auto_zeroing,
 	.get_hwdep_fw_cal = msm8x16_wcd_get_hwdep_fw_cal,
 	.set_cap_mode = msm8x16_wcd_configure_cap,
-	.skip_imped_detect = msm8x16_skip_imped_detect,
 };
 
 static const uint32_t wcd_imped_val[] = {4, 8, 12, 16,
@@ -986,8 +989,7 @@ static struct msm8x16_wcd_pdata *msm8x16_wcd_populate_dt_pdata(
 	BUG_ON(static_cnt <= 0 || ond_cnt < 0);
 	if ((static_cnt + ond_cnt) > ARRAY_SIZE(pdata->regulator)) {
 		dev_err(dev, "%s: Num of supplies %u > max supported %zd\n",
-				__func__, (static_cnt + ond_cnt),
-					ARRAY_SIZE(pdata->regulator));
+			__func__, static_cnt, ARRAY_SIZE(pdata->regulator));
 		ret = -EINVAL;
 		goto err;
 	}
@@ -1990,7 +1992,6 @@ static int msm8x16_wcd_put_dec_enum(struct snd_kcontrol *kcontrol,
 	u16 tx_mux_ctl_reg;
 	u8 adc_dmic_sel = 0x0;
 	int ret = 0;
-	char *dec_num;
 
 	if (ucontrol->value.enumerated.item[0] > e->max - 1) {
 		dev_err(codec->dev, "%s: Invalid enum value: %d\n",
@@ -2016,14 +2017,7 @@ static int msm8x16_wcd_put_dec_enum(struct snd_kcontrol *kcontrol,
 		goto out;
 	}
 
-	dec_num = strpbrk(dec_name, "12");
-	if (dec_num == NULL) {
-		dev_err(codec->dev, "%s: Invalid DEC selected\n", __func__);
-		ret = -EINVAL;
-		goto out;
-	}
-
-	ret = kstrtouint(dec_num, 10, &decimator);
+	ret = kstrtouint(strpbrk(dec_name, "12"), 10, &decimator);
 	if (ret < 0) {
 		dev_err(codec->dev, "%s: Invalid decimator = %s\n",
 			__func__, dec_name);
@@ -2376,14 +2370,8 @@ static int msm8x16_wcd_codec_enable_dmic(struct snd_soc_dapm_widget *w,
 	s32 *dmic_clk_cnt;
 	unsigned int dmic;
 	int ret;
-	char *dec_num = strpbrk(w->name, "12");
 
-	if (dec_num == NULL) {
-		dev_err(codec->dev, "%s: Invalid DMIC\n", __func__);
-		return -EINVAL;
-	}
-
-	ret = kstrtouint(dec_num, 10, &dmic);
+	ret = kstrtouint(strpbrk(w->name, "12"), 10, &dmic);
 	if (ret < 0) {
 		dev_err(codec->dev,
 			"%s: Invalid DMIC line on the codec\n", __func__);
@@ -2454,18 +2442,6 @@ static void msm8x16_wcd_set_auto_zeroing(struct snd_soc_codec *codec,
 	} else {
 		pr_debug("%s: Auto Zeroing is not required from CONGA\n",
 				__func__);
-	}
-}
-
-static void msm8x16_skip_imped_detect(struct snd_soc_codec *codec)
-{
-	struct msm8x16_wcd_priv *msm8x16_wcd;
-
-	if (codec != NULL) {
-		msm8x16_wcd = snd_soc_codec_get_drvdata(codec);
-		msm8x16_wcd->mbhc.skip_imped_detection = true;
-	} else {
-		pr_debug("%s: Codec pointer is NULL\n", __func__);
 	}
 }
 
@@ -2627,7 +2603,7 @@ static void tx_hpf_corner_freq_callback(struct work_struct *work)
 	dev_dbg(codec->dev, "%s(): decimator %u hpf_cut_of_freq 0x%x\n",
 		 __func__, hpf_work->decimator, (unsigned int)hpf_cut_of_freq);
 	snd_soc_update_bits(codec,
-			MSM8X16_WCD_A_ANALOG_TX_1_2_TXFE_CLKDIV, 0xFF, 0x51);
+			MSM8X16_WCD_A_ANALOG_TX_1_2_TXFE_CLKDIV, 0x51, 0x51);
 
 	snd_soc_update_bits(codec, tx_mux_ctl_reg, 0x30, hpf_cut_of_freq << 4);
 }
@@ -2652,7 +2628,6 @@ static int msm8x16_wcd_codec_enable_dec(struct snd_soc_dapm_widget *w,
 	u16 dec_reset_reg, tx_vol_ctl_reg, tx_mux_ctl_reg;
 	u8 dec_hpf_cut_of_freq;
 	int offset;
-	char *dec_num;
 
 	pdata = snd_soc_card_get_drvdata(codec->card);
 	dev_dbg(codec->dev, "%s %d\n", __func__, event);
@@ -2671,14 +2646,7 @@ static int msm8x16_wcd_codec_enable_dec(struct snd_soc_dapm_widget *w,
 		goto out;
 	}
 
-	dec_num = strpbrk(dec_name, "12");
-	if (dec_num == NULL) {
-		dev_err(codec->dev, "%s: Invalid Decimator\n", __func__);
-		ret = -EINVAL;
-		goto out;
-	}
-
-	ret = kstrtouint(dec_num, 10, &decimator);
+	ret = kstrtouint(strpbrk(dec_name, "12"), 10, &decimator);
 	if (ret < 0) {
 		dev_err(codec->dev,
 			"%s: Invalid decimator = %s\n", __func__, dec_name);
@@ -2728,7 +2696,7 @@ static int msm8x16_wcd_codec_enable_dec(struct snd_soc_dapm_widget *w,
 		}
 		snd_soc_update_bits(codec,
 				MSM8X16_WCD_A_ANALOG_TX_1_2_TXFE_CLKDIV,
-				0xFF, 0x42);
+				0x51, 0x40);
 
 		break;
 	case SND_SOC_DAPM_POST_PMU:
@@ -2844,26 +2812,25 @@ static int msm8x16_wcd_codec_enable_interpolator(struct snd_soc_dapm_widget *w,
 		/*
 		 * disable the mute enabled during the PMD of this device
 		 */
-		if ((w->shift == 0) &&
-			(msm8x16_wcd->mute_mask & HPHL_PA_DISABLE)) {
+		if (msm8x16_wcd->mute_mask & HPHL_PA_DISABLE) {
 			pr_debug("disabling HPHL mute\n");
 			snd_soc_update_bits(codec,
 				MSM8X16_WCD_A_CDC_RX1_B6_CTL, 0x01, 0x00);
 			msm8x16_wcd->mute_mask &= ~(HPHL_PA_DISABLE);
-		} else if ((w->shift == 1) &&
-				(msm8x16_wcd->mute_mask & HPHR_PA_DISABLE)) {
+		}
+		if (msm8x16_wcd->mute_mask & HPHR_PA_DISABLE) {
 			pr_debug("disabling HPHR mute\n");
 			snd_soc_update_bits(codec,
 				MSM8X16_WCD_A_CDC_RX2_B6_CTL, 0x01, 0x00);
 			msm8x16_wcd->mute_mask &= ~(HPHR_PA_DISABLE);
-		} else if ((w->shift == 2) &&
-				(msm8x16_wcd->mute_mask & SPKR_PA_DISABLE)) {
+		}
+		if (msm8x16_wcd->mute_mask & SPKR_PA_DISABLE) {
 			pr_debug("disabling SPKR mute\n");
 			snd_soc_update_bits(codec,
 				MSM8X16_WCD_A_CDC_RX3_B6_CTL, 0x01, 0x00);
 			msm8x16_wcd->mute_mask &= ~(SPKR_PA_DISABLE);
-		} else if ((w->shift == 0) &&
-				(msm8x16_wcd->mute_mask & EAR_PA_DISABLE)) {
+		}
+		if (msm8x16_wcd->mute_mask & EAR_PA_DISABLE) {
 			pr_debug("disabling EAR mute\n");
 			snd_soc_update_bits(codec,
 				MSM8X16_WCD_A_CDC_RX1_B6_CTL, 0x01, 0x00);
@@ -3046,12 +3013,79 @@ static int msm8x16_wcd_hphr_dac_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+static void msm8x16_analog_switch_delayed_enable(struct work_struct *work)
+{
+	int state = 0;
+
+	state = gpio_get_value(EXT_SPK_AMP_GPIO);
+	state = gpio_get_value(EXT_SPK_AMP_GPIO_1);
+	pr_debug("%s: Enable analog switch,external PA state:%d\n", __func__,state);
+
+	if(!state)
+		gpio_direction_output(EXT_SPK_AMP_HEADSET_GPIO, true);
+}
+
+void msm8x16_wcd_codec_set_headset_state(u32 state)
+{
+	switch_set_state((struct switch_dev *)&accdet_data, state);
+	accdet_state = state;
+}
+
+int msm8x16_wcd_codec_get_headset_state(void)
+{
+	pr_debug("%s accdet_state = %d\n", __func__, accdet_state);
+	return accdet_state;
+}
+static void enable_ldo17(int enable)
+{
+	static struct regulator *reg_l17 = 0;
+	static int status = 0;
+	int rc = 0;
+	if(!!status == !!enable)
+	{
+		return;
+	}
+	pr_err("wgz ldo17 enable = %d\n" , enable);
+	if(enable)
+	{
+		reg_l17 = regulator_get(0,"8916_l17");//wgz
+	}
+	if(reg_l17 != 0)
+	{
+		pr_err("wgz get regulator Ldo17 ok\n");
+		if(enable)
+		{
+			regulator_set_optimum_mode(reg_l17,100*1000);
+			regulator_set_voltage(reg_l17,2850000,2850000);
+			rc = regulator_enable(reg_l17);
+			if(rc)
+			{
+				pr_err("wgz regulator_enable error");
+			}
+		}
+		else
+		{
+			rc = regulator_disable(reg_l17);//wgz
+			if(rc)
+			{
+				pr_err("wgz regulator_disdable error");
+			}
+			regulator_put(reg_l17);
+			reg_l17 = 0;
+		}
+		status = enable;
+	}
+	else
+			{
+		pr_err("wgz get regulator Ldo17 error\n");
+	}
+}
 static int msm8x16_wcd_hph_pa_event(struct snd_soc_dapm_widget *w,
 			      struct snd_kcontrol *kcontrol, int event)
 {
 	struct snd_soc_codec *codec = w->codec;
 	struct msm8x16_wcd_priv *msm8x16_wcd = snd_soc_codec_get_drvdata(codec);
-
+	int state = 0;
 	dev_dbg(codec->dev, "%s: %s event = %d\n", __func__, w->name, event);
 
 	switch (event) {
@@ -3067,6 +3101,8 @@ static int msm8x16_wcd_hph_pa_event(struct snd_soc_dapm_widget *w,
 		break;
 
 	case SND_SOC_DAPM_POST_PMU:
+		enable_ldo17(1);//wgz
+		state = msm8x16_wcd_codec_get_headset_state();
 		usleep_range(7000, 7100);
 		if (w->shift == 5) {
 			snd_soc_update_bits(codec,
@@ -3079,6 +3115,12 @@ static int msm8x16_wcd_hph_pa_event(struct snd_soc_dapm_widget *w,
 			snd_soc_update_bits(codec,
 				MSM8X16_WCD_A_CDC_RX2_B6_CTL, 0x01, 0x00);
 		}
+		usleep_range(10000, 10100);
+
+		if(!state)
+			gpio_direction_output(EXT_SPK_AMP_HEADSET_GPIO, false);
+		else
+			schedule_delayed_work(&analog_switch_enable, msecs_to_jiffies(500));
 		break;
 
 	case SND_SOC_DAPM_PRE_PMD:
@@ -3119,6 +3161,8 @@ static int msm8x16_wcd_hph_pa_event(struct snd_soc_dapm_widget *w,
 			"%s: sleep 10 ms after %s PA disable.\n", __func__,
 			w->name);
 		usleep_range(10000, 10100);
+		gpio_direction_output(EXT_SPK_AMP_HEADSET_GPIO, false);
+		enable_ldo17(0);//wgz
 		break;
 	}
 	return 0;
@@ -3993,7 +4037,7 @@ static const struct msm8x16_wcd_reg_mask_val
 	/* Initialize current threshold to 350MA
 	 * number of wait and run cycles to 4096
 	 */
-	{MSM8X16_WCD_A_ANALOG_RX_COM_OCP_CTL, 0xFF, 0x12},
+	{MSM8X16_WCD_A_ANALOG_RX_COM_OCP_CTL, 0xFF, 0xD5},
 	{MSM8X16_WCD_A_ANALOG_RX_COM_OCP_COUNT, 0xFF, 0xFF},
 };
 
@@ -4331,6 +4375,17 @@ static int msm8x16_wcd_codec_probe(struct snd_soc_codec *codec)
 	wcd_mbhc_init(&msm8x16_wcd_priv->mbhc, codec, &mbhc_cb, &intr_ids,
 			true);
 
+	accdet_data.name = "h2w";
+	accdet_data.index = 0;
+	accdet_data.state = 0;
+
+	ret = switch_dev_register(&accdet_data);
+	if(ret)
+	{
+		dev_err(codec->dev, "%s: Failed to register h2w\n", __func__);
+		return -ENOMEM;
+	}
+
 	msm8x16_wcd_priv->mclk_enabled = false;
 	msm8x16_wcd_priv->clock_active = false;
 	msm8x16_wcd_priv->config_mode_active = false;
@@ -4353,6 +4408,8 @@ static int msm8x16_wcd_codec_probe(struct snd_soc_codec *codec)
 		registered_codec = NULL;
 		return -ENOMEM;
 	}
+
+	INIT_DELAYED_WORK(&analog_switch_enable, msm8x16_analog_switch_delayed_enable);
 	return 0;
 }
 
@@ -4684,11 +4741,6 @@ static int msm8x16_wcd_spmi_probe(struct spmi_device *spmi)
 		dev_dbg(&spmi->dev, "%s:Platform data from board file\n",
 			__func__);
 		pdata = spmi->dev.platform_data;
-	}
-	if (pdata == NULL) {
-		dev_err(&spmi->dev, "%s:Platform data failed to populate\n",
-			__func__);
-		goto rtn;
 	}
 
 	msm8x16 = kzalloc(sizeof(struct msm8x16_wcd), GFP_KERNEL);

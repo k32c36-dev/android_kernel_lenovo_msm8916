@@ -3254,6 +3254,12 @@ out:
  */
 int wake_up_process(struct task_struct *p)
 {
+#ifdef WGZ_DEBUG_SCHEDULE
+	if(p->state == __TASK_STOPPED && p->debug_state == __TASK_STOPPED)
+	{
+		return 0;
+	}
+#endif
 	WARN_ON(task_is_stopped_or_traced(p));
 	return try_to_wake_up(p, TASK_NORMAL, 0);
 }
@@ -4727,6 +4733,10 @@ need_resched:
 #ifdef CONFIG_ARCH_WANTS_CTXSW_LOGGING
 		dlog("%s: enter context_switch at %llu\n",
 						__func__, sched_clock());
+#endif
+
+#ifdef WGZ_DEBUG_SCHEDULE
+		next->last_schedule_jiffies = jiffies;
 #endif
 		context_switch(rq, prev, next); /* unlocks the rq */
 		/*

@@ -248,11 +248,27 @@ ssize_t persistent_ram_ecc_string(struct persistent_ram_zone *prz,
 	return ret;
 }
 
+//Added by David.Dai@wingtech.com for arm64bit memcpy
+#ifdef CONFIG_64BIT	
+static void *memcpy_pstore_for_64bit(void *dest, const void *src, size_t count)
+{
+   char *tmp = dest;
+   const char *s = src;
+   while ( count--)
+   	     *tmp++ = *s++;
+   return dest;
+}
+#endif
+
 static void notrace persistent_ram_update(struct persistent_ram_zone *prz,
 	const void *s, unsigned int start, unsigned int count)
 {
 	struct persistent_ram_buffer *buffer = prz->buffer;
+#ifdef CONFIG_64BIT	
+	memcpy_pstore_for_64bit(buffer->data + start, s, count);
+#else
 	memcpy(buffer->data + start, s, count);
+#endif
 	persistent_ram_update_ecc(prz, start, count);
 }
 

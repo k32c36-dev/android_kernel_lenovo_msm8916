@@ -49,6 +49,8 @@ module_param(disable_restart_work, uint, S_IRUGO | S_IWUSR);
 static int enable_debug;
 module_param(enable_debug, int, S_IRUGO | S_IWUSR);
 
+#define WT_SUBSYSTEM_REASTART_LEVEL "SYSTEM"
+
 /**
  * enum p_subsys_state - state of a subsystem (private)
  * @SUBSYS_NORMAL: subsystem is operating normally
@@ -1476,6 +1478,17 @@ struct subsys_device *subsys_register(struct subsys_desc *desc)
 	subsys->dev.release = subsys_device_release;
 	subsys->notif_state = -1;
 	subsys->desc->sysmon_pid = -1;
+        /* add by yujialin for bug 58452, if somebody want to modify this code, 
+        please conctact me */
+        if(0 == strncmp(WT_SUBSYSTEM_REASTART_LEVEL, "SYSTEM", 6)) {
+                printk("XXX::restartlevel system\r\n");//hoper
+                subsys->restart_level = RESET_SOC;//hoper
+        }
+
+        if(0 == strncmp(WT_SUBSYSTEM_REASTART_LEVEL, "RELATED", 7)) {
+                printk("XXX::restartlevel related\r\n");//hoper
+                subsys->restart_level = RESET_SUBSYS_COUPLED;//hoper
+        }
 
 	subsys->notify = subsys_notif_add_subsys(desc->name);
 

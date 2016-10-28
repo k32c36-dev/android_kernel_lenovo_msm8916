@@ -54,6 +54,7 @@ struct sched_param {
 #include <linux/gfp.h>
 
 #include <asm/processor.h>
+#define WGZ_DEBUG_SCHEDULE
 
 #define SCHED_ATTR_SIZE_VER0	48	/* sizeof first published struct */
 
@@ -1532,6 +1533,11 @@ struct task_struct {
 #if defined(CONFIG_BCACHE) || defined(CONFIG_BCACHE_MODULE)
 	unsigned int	sequential_io;
 	unsigned int	sequential_io_avg;
+#endif
+#ifdef WGZ_DEBUG_SCHEDULE
+	unsigned long 	debug_state;
+	unsigned long   last_schedule_jiffies;
+	unsigned long   last_check_jiffies;
 #endif
 };
 
