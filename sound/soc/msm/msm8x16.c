@@ -63,6 +63,15 @@
 #define WCD9XXX_MBHC_DEF_RLOADS 5
 #define DEFAULT_MCLK_RATE 9600000
 
+#define EXT_CLASS_D_EN_DELAY 13000
+#define EXT_CLASS_D_DIS_DELAY 3000
+#define EXT_CLASS_D_DELAY_DELTA 2000
+#define AW8155A_MODE 3
+
+static struct delayed_work lineout_amp_enable;
+static struct delayed_work lineout_amp_dualmode;
+//struct delayed_work lineout_amp_disable;
+
 #define WCD_MBHC_DEF_RLOADS 5
 
 #define LPASS_CSR_GP_LPAIF_PRI_PCM_PRI_MODE_MUXSEL 0x07702008
@@ -414,6 +423,7 @@ static char const *pri_rx_sample_rate_text[] = {"KHZ_48", "KHZ_96",
 static char const *mi2s_tx_sample_rate_text[] = {"KHZ_48", "KHZ_96",
 					"KHZ_192", "KHZ_8",
 					"KHZ_16", "KHZ_32"};
+static const char *const lineout_text[] = {"DISABLE", "ENABLE", "DUALMODE"};
 
 static int msm_auxpcm_be_params_fixup(struct snd_soc_pcm_runtime *rtd,
 					struct snd_pcm_hw_params *params)
@@ -566,6 +576,27 @@ static int mi2s_rx_bit_format_put(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
+static void msm8x16_ext_spk_control(u32 enable)
+{
+
+    if (enable) {
+        gpio_direction_output(EXT_SPK_AMP_GPIO, enable);
+	gpio_direction_output(EXT_SPK_AMP_GPIO_1, enable);
+        /* time takes enable the external power amplifier */
+        usleep_range(EXT_CLASS_D_EN_DELAY,
+            EXT_CLASS_D_EN_DELAY + EXT_CLASS_D_DELAY_DELTA);
+    } else {
+        gpio_direction_output(EXT_SPK_AMP_GPIO, enable);
+	gpio_direction_output(EXT_SPK_AMP_GPIO_1, enable);
+        /* time takes disable the external power amplifier */
+        usleep_range(EXT_CLASS_D_DIS_DELAY,
+            EXT_CLASS_D_DIS_DELAY + EXT_CLASS_D_DELAY_DELTA);
+    }
+
+    pr_debug("%s: %s external speaker PAs.\n", __func__,
+        enable ? "Enable" : "Disable");
+}
+
 static int loopback_mclk_get(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
@@ -646,7 +677,77 @@ static int loopback_mclk_put(struct snd_kcontrol *kcontrol,
 	}
 	return ret;
 }
+static void msm8x16_ext_spk_delayed_enable(struct work_struct *work)
+{
+    int i = 0;
+	
+    /* Close the headset device */
+    gpio_direction_output(EXT_SPK_AMP_HEADSET_GPIO, false);
+    usleep_range(EXT_CLASS_D_EN_DELAY,
+        EXT_CLASS_D_EN_DELAY + EXT_CLASS_D_DELAY_DELTA);
 
+    /* Open external audio PA device */
+    for(i = 0; i < AW8155A_MODE; i++) {
+        gpio_direction_output(EXT_SPK_AMP_GPIO, false);
+	gpio_direction_output(EXT_SPK_AMP_GPIO_1, false);
+        gpio_direction_output(EXT_SPK_AMP_GPIO, true);
+	gpio_direction_output(EXT_SPK_AMP_GPIO_1, true);
+    }
+    usleep_range(EXT_CLASS_D_EN_DELAY,
+        EXT_CLASS_D_EN_DELAY + EXT_CLASS_D_DELAY_DELTA);
+
+    pr_debug("%s: Enable external speaker PAs.\n", __func__);
+}
+
+static void msm8x16_ext_spk_delayed_dualmode(struct work_struct *work)
+{
+    int i = 0;
+
+    /* Open the headset device */
+    gpio_direction_output(EXT_SPK_AMP_HEADSET_GPIO, true);
+    usleep_range(EXT_CLASS_D_EN_DELAY,
+        EXT_CLASS_D_EN_DELAY + EXT_CLASS_D_DELAY_DELTA);
+
+    for(i = 0; i < AW8155A_MODE; i++) {
+        gpio_direction_output(EXT_SPK_AMP_GPIO, false);
+	gpio_direction_output(EXT_SPK_AMP_GPIO_1, false);
+        gpio_direction_output(EXT_SPK_AMP_GPIO, true);
+	gpio_direction_output(EXT_SPK_AMP_GPIO_1, true);
+    }
+    usleep_range(EXT_CLASS_D_EN_DELAY,
+        EXT_CLASS_D_EN_DELAY + EXT_CLASS_D_DELAY_DELTA);
+
+    pr_debug("%s: Enable external speaker PAs dualmode.\n", __func__);
+}
+static int lineout_status_get(struct snd_kcontrol *kcontrol,
+	struct snd_ctl_elem_value *ucontrol)
+{
+	return 0;
+}
+static int lineout_status_put(struct snd_kcontrol *kcontrol,
+	struct snd_ctl_elem_value *ucontrol)
+{
+	int state = 0;
+	state = ucontrol->value.integer.value[0];
+	pr_debug("%s: external speaker PA mode:%d\n", __func__, state);
+
+	switch (state) {
+	case 1:
+		schedule_delayed_work(&lineout_amp_enable, msecs_to_jiffies(50));
+		break;
+	case 0:
+		//schedule_delayed_work(&lineout_amp_disable, msecs_to_jiffies(5));
+		msm8x16_ext_spk_control(0);
+		break;
+	case 2:
+		schedule_delayed_work(&lineout_amp_dualmode, msecs_to_jiffies(50));
+		break;
+	default:
+		pr_err("%s: Unexpected input value\n", __func__);
+		break;
+	}
+	return 0;
+}
 static int msm_btsco_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 					struct snd_pcm_hw_params *params)
 {
@@ -1244,6 +1345,7 @@ static const struct soc_enum msm_snd_enum[] = {
 	SOC_ENUM_SINGLE_EXT(2, loopback_mclk_text),
 	SOC_ENUM_SINGLE_EXT(6, pri_rx_sample_rate_text),
 	SOC_ENUM_SINGLE_EXT(6, mi2s_tx_sample_rate_text),
+	SOC_ENUM_SINGLE_EXT(3, lineout_text),
 };
 
 static const char *const btsco_rate_text[] = {"BTSCO_RATE_8KHZ",
@@ -1267,6 +1369,8 @@ static const struct snd_kcontrol_new msm_snd_controls[] = {
 			pri_rx_sample_rate_get, pri_rx_sample_rate_put),
 	SOC_ENUM_EXT("MI2S TX SampleRate", msm_snd_enum[4],
 			mi2s_tx_sample_rate_get, mi2s_tx_sample_rate_put),
+	SOC_ENUM_EXT("Lineout_1 amp", msm_snd_enum[3],
+			lineout_status_get, lineout_status_put),
 };
 
 static int msm8x16_mclk_event(struct snd_soc_dapm_widget *w,
@@ -1768,7 +1872,7 @@ static void *def_msm8x16_wcd_mbhc_cal(void)
 	}
 
 #define S(X, Y) ((WCD_MBHC_CAL_PLUG_TYPE_PTR(msm8x16_wcd_cal)->X) = (Y))
-	S(v_hs_max, 1500);
+	S(v_hs_max, 1700);
 #undef S
 #define S(X, Y) ((WCD_MBHC_CAL_BTN_DET_PTR(msm8x16_wcd_cal)->X) = (Y))
 	S(num_btn, WCD_MBHC_DEF_BUTTONS);
@@ -1791,16 +1895,16 @@ static void *def_msm8x16_wcd_mbhc_cal(void)
 	 * 210-290 == Button 2
 	 * 360-680 == Button 3
 	 */
-	btn_low[0] = 75;
-	btn_high[0] = 75;
-	btn_low[1] = 150;
-	btn_high[1] = 150;
-	btn_low[2] = 237;
-	btn_high[2] = 237;
-	btn_low[3] = 450;
-	btn_high[3] = 450;
-	btn_low[4] = 500;
-	btn_high[4] = 500;
+	btn_low[0] = 87;
+	btn_high[0] = 87;
+	btn_low[1] = 255;
+	btn_high[1] = 237;
+	btn_low[2] = 325;
+	btn_high[2] = 400;
+	btn_low[3] = 425;
+	btn_high[3] = 575;
+	btn_low[4] = 525;
+	btn_high[4] = 735;
 
 	return msm8x16_wcd_cal;
 }
@@ -1849,6 +1953,8 @@ static int msm_audrx_init(struct snd_soc_pcm_runtime *rtd)
 			return ret;
 		}
 	}
+	INIT_DELAYED_WORK(&lineout_amp_enable, msm8x16_ext_spk_delayed_enable);
+	INIT_DELAYED_WORK(&lineout_amp_dualmode, msm8x16_ext_spk_delayed_dualmode);
 	return msm8x16_wcd_hs_detect(codec, &mbhc_cfg);
 }
 
@@ -3138,7 +3244,7 @@ static int msm8x16_asoc_machine_probe(struct platform_device *pdev)
 	if (!pdata) {
 		dev_err(&pdev->dev, "Can't allocate msm8x16_asoc_mach_data\n");
 		ret = -ENOMEM;
-		goto err1;
+		goto err;
 	}
 
 	pdata->vaddr_gpio_mux_spkr_ctl =
@@ -3359,7 +3465,6 @@ err:
 	if (pdata->vaddr_gpio_mux_pcm_ctl)
 		iounmap(pdata->vaddr_gpio_mux_pcm_ctl);
 	devm_kfree(&pdev->dev, pdata);
-err1:
 	return ret;
 }
 

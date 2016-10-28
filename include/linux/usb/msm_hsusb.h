@@ -104,7 +104,12 @@ enum msm_usb_phy_type {
 	SNPS_FEMTO_PHY,
 };
 
-#define IDEV_CHG_MAX	1500
+#ifdef  WT_USE_86519_CHARGE_1200
+#define IDEV_CHG_MAX	1200
+#else
+#define IDEV_CHG_MAX	1500   //Other_platform_modify 20151124 huangfusheng.wt solve set current err in lenovo ltr test     
+#endif
+
 #define IDEV_CHG_MIN	500
 #define IUNIT		100
 
